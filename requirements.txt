@@ -1,0 +1,8 @@
+streamlit
+pandas
+finance-datareader
+plotly
+requests
+beautifulsoup4
+streamlit-autorefresh
+google-generativeai
