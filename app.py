@@ -78,27 +78,31 @@ with st.sidebar:
         st.markdown("🔄 **실시간 업데이트:** ⏸️ 일시 정지 (상세 분석/리포트 작성 중)")
 
 # =====================================================================
-# 🔥 [완벽 해결] 100% 실시간 데이터 파이프라인 (네이버 모바일 API 다이렉트 연동)
+# [데이터 파이프라인 엔진 모음] (오리지널 동적 25종목 크롤링 복구 완료)
 # =====================================================================
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_reits_master_list():
-    # 국내 상장된 실제 리츠 23종목 마스터 데이터
-    return {
-        '395400': 'SK리츠', '365550': 'ESR켄달스퀘어리츠', '330590': '롯데리츠',
-        '348950': '제이알글로벌리츠', '293940': '신한알파리츠', '357120': '코람코에너지리츠',
-        '264660': '이리츠코크렙', '400760': 'NH올원리츠', '377190': '디앤디플랫폼리츠',
-        '396690': '미래에셋글로벌리츠', '357430': '마스턴프리미어리츠', '417310': '코람코더원리츠',
-        '334890': '이지스밸류리츠', '327260': '이지스레지던스리츠', '357250': '미래에셋맵스리츠',
-        '404990': '신한서부티엔디리츠', '338100': 'NH프라임리츠', '432320': 'KB스타리츠',
-        '451800': '삼성FN리츠', '448730': '한화리츠', '145270': '케이탑리츠',
-        '088260': '에이리츠', '487140': '신한글로벌액티브리츠'
-    }
+@st.cache_data(ttl=600, show_spinner=False)
+def get_krx_listing():
+    # 🔥 클라우드 환경에서 KRX 차단 시 화면이 깨지지 않도록 5번 재시도하는 무적의 래퍼(Wrapper)
+    for _ in range(5):
+        try:
+            df = fdr.StockListing('KRX')
+            if not df.empty:
+                return df
+        except:
+            time.sleep(1)
+    return pd.DataFrame()
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def crawl_reits_sector_by_news():
-    reits = get_reits_master_list()
+    df_krx = get_krx_listing()
+    if df_krx.empty: return {}
+    
+    condition = df_krx['Name'].str.contains('리츠') & ~df_krx['Name'].str.contains('메리츠|블리츠')
+    official_reits = df_krx[condition].copy()
+    
     sector_dict = {}
-    for code, name in reits.items():
+    for index, row in official_reits.iterrows():
+        name, code = row['Name'], row['Code']
         url = f"https://search.naver.com/search.naver?where=news&query={name} 자산"
         try:
             res = requests.get(url, headers={'User-agent': 'Mozilla/5.0'}, timeout=3)
@@ -132,36 +136,21 @@ def load_historical_index(sector_mapping):
 
 @st.cache_data(ttl=10, show_spinner=False)
 def load_realtime_data(sector_mapping):
-    reits = get_reits_master_list()
-    data_list = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    if not sector_mapping: return pd.DataFrame()
     
-    # 네이버 금융 실시간 모바일 API를 찔러서 실제 가격 긁어오기 (10초마다 갱신)
-    for code, name in reits.items():
-        try:
-            url = f"https://m.stock.naver.com/api/stock/{code}/integration"
-            res = requests.get(url, headers=headers, timeout=3).json()
-            
-            # API에서 던져주는 찐 데이터 (콤마 제거 후 정수 변환)
-            price = int(res['stockEndType']['closePrice'].replace(',', ''))
-            compareToPreviousPrice = int(res['stockEndType']['compareToPreviousPrice'].replace(',', ''))
-            fluctuationsRatio = float(res['stockEndType']['fluctuationsRatio'])
-            volume = int(res['stockEndType']['accumulatedTradingVolume'].replace(',', ''))
-            marcap = int(res['stockEndType']['marketValue'].replace(',', '')) # 단위: 억 원
-            
-            # 하락장이면 전일비에 마이너스(-) 기호 붙여주기
-            if fluctuationsRatio < 0:
-                compareToPreviousPrice = -compareToPreviousPrice
-                
-            data_list.append([code, name, price, compareToPreviousPrice, fluctuationsRatio, volume, marcap])
-        except Exception as e:
-            pass
-            
-    df = pd.DataFrame(data_list, columns=['종목코드', '종목명', '현재가', '전일비', '등락률(%)', '거래량', '시가총액(억)'])
-    df['섹터'] = df['종목코드'].map(sector_mapping)
-    df = df.sort_values(by='시가총액(억)', ascending=False).reset_index(drop=True)
-    df.insert(0, '순번', df.index + 1)
-    return df
+    df_krx = get_krx_listing()
+    if df_krx.empty: return pd.DataFrame()
+    
+    df_reits = df_krx[df_krx['Code'].isin(sector_mapping.keys())].copy()
+    if df_reits.empty: return pd.DataFrame()
+    
+    df_reits = df_reits[['Code', 'Name', 'Close', 'Changes', 'ChagesRatio', 'Volume', 'Marcap']]
+    df_reits.columns = ['종목코드', '종목명', '현재가', '전일비', '등락률(%)', '거래량', '시가총액(억)']
+    df_reits['시가총액(억)'] = (df_reits['시가총액(억)'] / 100000000).astype(int)
+    df_reits['섹터'] = df_reits['종목코드'].map(sector_mapping)
+    df_reits = df_reits.sort_values(by='시가총액(억)', ascending=False).reset_index(drop=True)
+    df_reits.insert(0, '순번', df_reits.index + 1)
+    return df_reits
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_dart_corp_code_mapping(api_key):
@@ -205,7 +194,7 @@ def fetch_dart_disclosures(api_key, corp_code):
     return []
 
 # --- 초기 데이터 로드 ---
-with st.spinner('실시간 네이버 금융 API와 통신하여 주가를 연동하고 있습니다... (최초 1회 약 3초 소요)'):
+with st.spinner('한국거래소(KRX)와 통신하여 25개 상장 리츠 데이터를 로드하고 있습니다...'):
     sector_map = crawl_reits_sector_by_news()
     index_df = load_historical_index(sector_map)
 df = load_realtime_data(sector_map)
@@ -218,16 +207,20 @@ if menu == "1. 상장 리츠 종합 현황":
     st.title("📊 RI Pro: 상장 리츠 실시간 종합 현황")
     st.info(f"💡 **AI 섹터 분류 알고리즘:** 네이버 뉴스에서 {len(df)}개 종목의 최신 기사를 스크래핑하여 단어 빈도수(NLP TF)를 기반으로 편입 자산을 자동 분류했습니다.")
     
-    total_market_cap = df['시가총액(억)'].sum()
-    up_count, down_count, flat_count = len(df[df['전일비'] > 0]), len(df[df['전일비'] < 0]), len(df[df['전일비'] == 0]) 
-    top_gainer = df.sort_values(by='등락률(%)', ascending=False).iloc[0] if not df[df['전일비'] > 0].empty else None
+    if not df.empty:
+        total_market_cap = df['시가총액(억)'].sum()
+        up_count, down_count, flat_count = len(df[df['전일비'] > 0]), len(df[df['전일비'] < 0]), len(df[df['전일비'] == 0]) 
+        top_gainer = df.sort_values(by='등락률(%)', ascending=False).iloc[0] if not df[df['전일비'] > 0].empty else None
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("시장 전체 시가총액", f"{total_market_cap:,} 억원")
-    col2.metric("📈 상승 종목", f"{up_count} 개")
-    col3.metric("➖ 보합 종목", f"{flat_count} 개")
-    col4.metric("📉 하락 종목", f"{down_count} 개")
-    col5.metric("🔥 상승률 1위", top_gainer['종목명'] if top_gainer is not None else "없음", f"{top_gainer['등락률(%)']:.2f}%" if top_gainer is not None else "-")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("시장 전체 시가총액", f"{total_market_cap:,} 억원")
+        col2.metric("📈 상승 종목", f"{up_count} 개")
+        col3.metric("➖ 보합 종목", f"{flat_count} 개")
+        col4.metric("📉 하락 종목", f"{down_count} 개")
+        col5.metric("🔥 상승률 1위", top_gainer['종목명'] if top_gainer is not None else "없음", f"{top_gainer['등락률(%)']:.2f}%" if top_gainer is not None else "-")
+    else:
+        st.error("🚨 현재 클라우드 서버와 한국거래소(KRX) 간의 통신 지연으로 데이터를 불러오지 못했습니다. 우측 상단의 'Rerun' 버튼을 누르거나 잠시 후 새로고침 해주세요.")
+        
     st.markdown("---")
 
     st.subheader("📈 상장리츠 지수 추이 (최근 3개월, Base=100)")
@@ -244,16 +237,18 @@ if menu == "1. 상장 리츠 종합 현황":
     bottom_col1, bottom_col2 = st.columns([1, 1.2]) 
     with bottom_col1:
         st.subheader("🗺️ 섹터별 실시간 시장 지도")
-        fig_tree = px.treemap(df, path=[px.Constant("상장 리츠 전체"), '섹터', '종목명'], values='시가총액(억)', color='등락률(%)', color_continuous_scale=['#0051C9', '#F0F0F0', '#D91212'], color_continuous_midpoint=0, custom_data=['현재가', '전일비'])
-        fig_tree.update_traces(hovertemplate="<b>%{label}</b><br>시가총액: %{value:,} 억원<br>현재가: %{customdata[0]:,} 원<br>등락률: %{color:.2f}% (전일비 %{customdata[1]:,}원)")
-        st.plotly_chart(fig_tree, use_container_width=True)
+        if not df.empty:
+            fig_tree = px.treemap(df, path=[px.Constant("상장 리츠 전체"), '섹터', '종목명'], values='시가총액(억)', color='등락률(%)', color_continuous_scale=['#0051C9', '#F0F0F0', '#D91212'], color_continuous_midpoint=0, custom_data=['현재가', '전일비'])
+            fig_tree.update_traces(hovertemplate="<b>%{label}</b><br>시가총액: %{value:,} 억원<br>현재가: %{customdata[0]:,} 원<br>등락률: %{color:.2f}% (전일비 %{customdata[1]:,}원)")
+            st.plotly_chart(fig_tree, use_container_width=True)
 
     with bottom_col2:
         st.subheader("📋 전체 리츠 실시간 시세 현황")
-        selected_sectors = st.multiselect("📌 조회할 섹터를 선택하세요:", options=df['섹터'].unique(), default=df['섹터'].unique())
-        filtered_df = df[df['섹터'].isin(selected_sectors)]
-        styled_df = filtered_df.style.map(lambda val: 'color: #D91212; font-weight: bold;' if val > 0 else ('color: #0051C9; font-weight: bold;' if val < 0 else 'color: black;'), subset=['전일비', '등락률(%)']).format({'현재가': '{:,}', '전일비': '{:,}', '등락률(%)': '{:.2f}', '거래량': '{:,}', '시가총액(억)': '{:,}'}).bar(subset=['시가총액(억)'], color='#E0E0E0')
-        st.dataframe(styled_df, use_container_width=True, hide_index=True, height=500)
+        if not df.empty:
+            selected_sectors = st.multiselect("📌 조회할 섹터를 선택하세요:", options=df['섹터'].unique(), default=df['섹터'].unique())
+            filtered_df = df[df['섹터'].isin(selected_sectors)]
+            styled_df = filtered_df.style.map(lambda val: 'color: #D91212; font-weight: bold;' if val > 0 else ('color: #0051C9; font-weight: bold;' if val < 0 else 'color: black;'), subset=['전일비', '등락률(%)']).format({'현재가': '{:,}', '전일비': '{:,}', '등락률(%)': '{:.2f}', '거래량': '{:,}', '시가총액(억)': '{:,}'}).bar(subset=['시가총액(억)'], color='#E0E0E0')
+            st.dataframe(styled_df, use_container_width=True, hide_index=True, height=500)
 
 # =====================================================================
 # [페이지 2] 세부 종목 분석
@@ -261,6 +256,10 @@ if menu == "1. 상장 리츠 종합 현황":
 elif menu == "2. 세부 종목 분석":
     st.title("🔍 RI Pro: 개별 종목 심층 분석")
     
+    if df.empty:
+        st.error("데이터 로드 중입니다. 잠시 후 다시 시도해주세요.")
+        st.stop()
+        
     stock_names = df['종목명'].tolist()
     selected_stock = st.selectbox("📊 분석할 상장 리츠를 선택하세요:", stock_names)
     
@@ -390,6 +389,10 @@ elif menu == "3. AI 심사 리포트":
     st.title("🤖 RI Pro: 생성형 AI 기반 여신심사 리포트")
     st.markdown("선택된 리츠의 실시간 주가, 추정 재무 데이터, 그리고 **최신 뉴스 헤드라인을 100% 실시간으로 긁어모아** Google Gemini AI가 즉석에서 심사 의견을 창작합니다.")
     
+    if df.empty:
+        st.error("데이터 로드 중입니다. 잠시 후 다시 시도해주세요.")
+        st.stop()
+        
     stock_names = df['종목명'].tolist()
     selected_stock = st.selectbox("🎯 리포트를 생성할 대상 리츠를 선택하세요:", stock_names)
     stock_info = df[df['종목명'] == selected_stock].iloc[0]
